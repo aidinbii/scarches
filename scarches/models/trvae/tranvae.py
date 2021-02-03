@@ -6,7 +6,7 @@ import numpy as np
 
 from .trvae import trVAE
 from .losses import mse, mmd, zinb, nb
-from ._utils import one_hot_encoder,euclidean_dist
+from ._utils import one_hot_encoder
 
 
 class tranVAE(trVAE):
@@ -14,7 +14,8 @@ class tranVAE(trVAE):
                  input_dim: int,
                  conditions: list,
                  cell_types: list,
-                 landmarks_labeled: Optional[np.ndarray] = None,
+                 landmarks_labeled: Optional[list] = None,
+                 landmarks_normalize: Optional[np.ndarray] = None,
                  landmarks_unlabeled: Optional[np.ndarray] = None,
                  **trvae_kwargs,
                  ):
@@ -26,18 +27,44 @@ class tranVAE(trVAE):
         self.cell_types = cell_types
         self.cell_type_encoder = {k: v for k, v in zip(cell_types, range(len(cell_types)))}
         self.landmarks_labeled = landmarks_labeled
+        self.landmarks_normalize = landmarks_normalize
         self.landmarks_unlabeled = landmarks_unlabeled
         self.new_landmarks = None
+
         if landmarks_labeled is not None:
+            # Save indices of possible new landmarks to train
             self.new_landmarks = []
-            for idx in range(self.n_cell_types - landmarks_labeled.shape[0]):
-                self.new_landmarks.append(landmarks_labeled.shape[0] + idx)
+            for idx in range(self.n_cell_types - len(landmarks_labeled)):
+                self.new_landmarks.append(len(landmarks_labeled) + idx)
+
+        if landmarks_normalize is not None:
+            self.landmarks_normalize = torch.tensor(self.landmarks_normalize)
+
+        if landmarks_unlabeled is not None:
+            self.landmarks_unlabeled = torch.tensor(self.landmarks_unlabeled)
+
+    def get_prob_matrix(self, data):
+        # Returns (N-batch x N-cell-types)-matrix with probabilities
+        results = []
+        for idx, landmark in enumerate(self.landmarks_labeled):
+            unn_probs = landmark.log_prob(data).exp()
+            result = unn_probs / self.landmarks_normalize[idx].cpu()
+            result = torch.mean(result, axis=1)
+            results.append(result)
+        results = torch.stack(results).transpose(0, 1)
+
+        return results
 
     def classify(self, x, c=None):
         latent = self.get_latent(x,c)
-        distances = euclidean_dist(latent, self.landmarks_labeled)
-        _, y_pred = torch.max(-distances, dim=1)
-        return y_pred
+        results = self.get_prob_matrix(latent)
+        probs, preds = torch.max(results, axis=1)
+        return preds, probs
+
+    def check_for_unseen(self):
+        results = self.get_prob_matrix(self.landmarks_unlabeled)
+        probs, preds = torch.max(results, axis=1)
+        return preds, probs
 
     def forward(self, x=None, batch=None, sizefactor=None, celltype=None, labeled=None):
         x_log = torch.log(1 + x)

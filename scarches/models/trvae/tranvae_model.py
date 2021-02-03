@@ -53,7 +53,8 @@ class TRANVAE(BaseMixin):
         cell_types: Optional[list] = None,
         labeled_indices: Optional[list] = None,
         n_clusters: Optional[int] = None,
-        landmarks_labeled: Optional[np.ndarray] = None,
+        landmarks_labeled: Optional[list] = None,
+        landmarks_normalize: Optional[list] = None,
         landmarks_unlabeled: Optional[np.ndarray] = None,
         hidden_layer_sizes: list = [256, 64],
         latent_dim: int = 10,
@@ -105,6 +106,7 @@ class TRANVAE(BaseMixin):
 
         self.input_dim_ = adata.n_vars
         self.landmarks_labeled_ = landmarks_labeled
+        self.landmarks_normalize_ = landmarks_normalize
         self.landmarks_unlabeled_ = landmarks_unlabeled
 
         self.model = tranVAE(
@@ -112,6 +114,7 @@ class TRANVAE(BaseMixin):
             conditions=self.conditions_,
             cell_types=self.cell_types_,
             landmarks_labeled=self.landmarks_labeled_,
+            landmarks_normalize=self.landmarks_normalize_,
             landmarks_unlabeled=self.landmarks_unlabeled_,
             hidden_layer_sizes=self.hidden_layer_sizes_,
             latent_dim=self.latent_dim_,
@@ -161,8 +164,9 @@ class TRANVAE(BaseMixin):
             **kwargs)
         self.trainer.train(n_epochs, lr, eps)
         self.is_trained_ = True
-        self.landmarks_labeled_ = \
-            self.model.landmarks_labeled.cpu().numpy() if self.model.landmarks_labeled is not None else None
+        self.landmarks_labeled_ = self.model.landmarks_labeled
+        self.landmarks_normalize_ = \
+            self.model.landmarks_normalize.cpu().detach().numpy() if self.model.landmarks_normalize is not None else None
         self.landmarks_unlabeled_ = \
             self.model.landmarks_unlabeled.cpu().numpy() if self.model.landmarks_unlabeled is not None else None
 
@@ -239,11 +243,13 @@ class TRANVAE(BaseMixin):
         x = torch.tensor(x, device=device)
 
         preds = []
+        probs = []
         indices = torch.arange(x.size(0), device=device)
         subsampled_indices = indices.split(512)
         for batch in subsampled_indices:
-            pred = self.model.classify(x[batch, :], c[batch])
+            pred, prob = self.model.classify(x[batch, :], c[batch])
             preds += [pred.cpu().detach()]
+            probs += [prob.cpu().detach()]
 
         full_pred = np.array(torch.cat(preds))
         inv_ct_encoder = {v: k for k, v in self.model.cell_type_encoder.items()}
@@ -252,7 +258,23 @@ class TRANVAE(BaseMixin):
         for pred in full_pred:
             full_pred_names.append(inv_ct_encoder[pred])
 
-        return np.array(full_pred_names)
+        full_prob = np.array(torch.cat(probs))
+
+        return np.array(full_pred_names), full_prob
+
+    def check_for_unseen(self):
+        pred, prob = self.model.check_for_unseen()
+        full_prob = prob.detach().cpu().numpy()
+        full_pred = pred.detach().cpu().numpy()
+        inv_ct_encoder = {v: k for k, v in self.model.cell_type_encoder.items()}
+        full_pred_names = []
+        for idx, pred in enumerate(full_pred):
+            if full_prob[idx] >= 0.01:
+                full_pred_names.append(inv_ct_encoder[pred])
+            else:
+                full_pred_names.append('UNSEEN')
+
+        return np.array(full_pred_names), full_prob
 
     @classmethod
     def _get_init_params_from_dict(cls, dct):
@@ -264,6 +286,7 @@ class TRANVAE(BaseMixin):
             'labeled_indices': dct['labeled_indices_'],
             'n_clusters': dct['n_clusters_'],
             'landmarks_labeled': dct['landmarks_labeled_'],
+            'landmarks_normalize': dct['landmarks_normalize_'],
             'landmarks_unlabeled': dct['landmarks_unlabeled_'],
             'hidden_layer_sizes': dct['hidden_layer_sizes_'],
             'latent_dim': dct['latent_dim_'],
@@ -297,7 +320,6 @@ class TRANVAE(BaseMixin):
         n_clusters: Optional[int] = None,
         freeze: bool = True,
         freeze_expression: bool = True,
-        freeze_classifier: bool = True,
         remove_dropout: bool = True,
     ):
         """Transfer Learning function for new data. Uses old trained model and expands it for new conditions.

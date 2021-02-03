@@ -1,5 +1,7 @@
 import torch
 from sklearn.cluster import KMeans
+from torch.distributions import Normal
+import numpy as np
 from .trainer import Trainer
 from ._utils import make_dataset, euclidean_dist
 
@@ -64,9 +66,16 @@ class tranVAETrainer(Trainer):
     ):
         super().__init__(model, adata, **kwargs)
 
-        self.landmarks_labeled = self.model.landmarks_labeled
+        self.landmarks_labeled = None
+
+        if self.model.landmarks_labeled is not None:
+            landmarks_means = []
+            for landmark in self.model.landmarks_labeled:
+                landmarks_means.append(landmark.mean)
+            self.landmarks_labeled = torch.cat(landmarks_means)
+
         if self.landmarks_labeled is not None:
-            self.landmarks_labeled = torch.tensor(self.landmarks_labeled, device=self.device)
+            self.landmarks_labeled = self.landmarks_labeled.to(device=self.device)
 
         self.landmarks_unlabeled = self.model.landmarks_unlabeled
         if self.landmarks_unlabeled is not None:
@@ -107,6 +116,19 @@ class tranVAETrainer(Trainer):
                 weight_decay=self.weight_decay
             )
 
+    def get_latent_train(self):
+        latents = []
+        indices = torch.arange(self.train_data.data.size(0), device=self.device)
+        subsampled_indices = indices.split(self.batch_size)
+        for batch in subsampled_indices:
+            latent = self.model.get_latent(
+                self.train_data.data[batch, :].to(self.device),
+                self.train_data.conditions[batch].to(self.device)
+            )
+            latents += [latent]
+        latent = torch.cat(latents)
+        return latent
+
     def loss(self, total_batch=None):
         latent, recon_loss, kl_loss, mmd_loss = self.model(**total_batch)
         trvae_loss = recon_loss + self.calc_alpha_coeff()*kl_loss + mmd_loss
@@ -122,7 +144,7 @@ class tranVAETrainer(Trainer):
                 torch.stack(self.landmarks_unlabeled).squeeze(),
                 self.tau,
             )
-            landmark_loss = unlabeled_loss
+            #landmark_loss = unlabeled_loss
         if 1 in label_categories:
             labeled_loss, labeled_accuracy = self.landmark_labeled_loss(
                 latent[total_batch['labeled'] == 1],
@@ -144,16 +166,7 @@ class tranVAETrainer(Trainer):
     def on_epoch_end(self):
         self.model.eval()
         # Update landmark positions
-        latents = []
-        indices = torch.arange(self.train_data.data.size(0), device=self.device)
-        subsampled_indices = indices.split(self.batch_size)
-        for batch in subsampled_indices:
-            latent = self.model.get_latent(
-                self.train_data.data[batch, :].to(self.device),
-                self.train_data.conditions[batch].to(self.device)
-            )
-            latents += [latent]
-        latent = torch.cat(latents)
+        latent = self.get_latent_train()
         label_categories = self.train_data.labeled_vector.unique().tolist()
         if 0 in label_categories:
             for landmk in self.landmarks_unlabeled:
@@ -182,7 +195,15 @@ class tranVAETrainer(Trainer):
         super().on_epoch_end()
 
     def after_loop(self):
-        self.model.landmarks_labeled = self.landmarks_labeled
+        latent = self.get_latent_train()
+        landmarks_distr, landmarks_normalize = self.update_landmark_distr(
+            latent[self.train_data.labeled_vector == 1],
+            self.train_data.cell_types[self.train_data.labeled_vector == 1],
+            self.model.new_landmarks
+        )
+        self.model.landmarks_labeled = landmarks_distr
+        self.model.landmarks_normalize = landmarks_normalize
+
         if 0 in self.train_data.labeled_vector.unique().tolist():
             self.model.landmarks_unlabeled = torch.stack(self.landmarks_unlabeled).squeeze()
         else:
@@ -190,17 +211,7 @@ class tranVAETrainer(Trainer):
 
     def initialize_landmarks(self):
         # Compute Latent of whole train data
-        indices = torch.arange(self.train_data.data.size(0), device=self.device)
-        subsampled_indices = indices.split(self.batch_size)
-        latents = []
-        for batch in subsampled_indices:
-            with torch.no_grad():
-                latent = self.model.get_latent(
-                    self.train_data.data[batch, :].to(self.device),
-                    self.train_data.conditions[batch].to(self.device)
-                )
-            latents += [latent]
-        latent = torch.cat(latents)
+        latent = self.get_latent_train()
 
         # Init labeled Landmarks if labeled data existent
         if 1 in self.train_data.labeled_vector.unique().tolist():
@@ -212,8 +223,7 @@ class tranVAETrainer(Trainer):
                         for value in self.model.new_landmarks:
                             indices = labeled_cell_types.eq(value).nonzero()
                             landmark = labeled_latent[indices].mean(0)
-                            self.landmarks_labeled = torch.cat(
-                                [self.landmarks_labeled, landmark]) if self.landmarks_labeled is not None else landmark
+                            self.landmarks_labeled = torch.cat([self.landmarks_labeled, landmark])
             else:
                 self.landmarks_labeled = self.update_labeled_landmarks(
                     latent[self.train_data.labeled_vector == 1],
@@ -232,7 +242,7 @@ class tranVAETrainer(Trainer):
                 for _ in range(self.n_clusters)
             ]
             k_means = KMeans(n_clusters=self.n_clusters,
-                             random_state=0).fit(latent[self.train_data.labeled_vector == 0].cpu())
+                             random_state=0).fit(latent[self.train_data.labeled_vector == 0].cpu().detach().numpy())
             k_means_lndmk = torch.tensor(k_means.cluster_centers_, device=self.device)
             with torch.no_grad():
                 [self.landmarks_unlabeled[i].copy_(k_means_lndmk[i, :]) for i in range(k_means_lndmk.shape[0])]
@@ -243,7 +253,7 @@ class tranVAETrainer(Trainer):
             landmarks_mean = None
             for value in range(self.n_labeled):
                 if (mask is None or value in mask) and value in unique_labels:
-                    indices = labels.eq(value).nonzero()
+                    indices = labels.eq(value).nonzero(as_tuple=False)
                     landmark = latent[indices].mean(0)
                     landmarks_mean = torch.cat([landmarks_mean, landmark]) if landmarks_mean is not None else landmark
                 else:
@@ -267,7 +277,7 @@ class tranVAETrainer(Trainer):
         distances = euclidean_dist(latent, landmarks)
         loss = None
         for value in unique_labels:
-            indices = labels.eq(value).nonzero()
+            indices = labels.eq(value).nonzero(as_tuple=False)
             label_loss = distances[indices, value].sum(0)
             loss = torch.cat([loss, label_loss]) if loss is not None else label_loss
         loss = loss.sum() / n_samples
@@ -303,3 +313,20 @@ class tranVAETrainer(Trainer):
 
         return loss_val_test, args_count
 
+    def update_landmark_distr(self, latent, labels,  mask=None):
+        landmarks = []
+        landmarks_normalize = []
+        for idx,landmark in enumerate(self.landmarks_labeled):
+            if (mask is None or idx in mask) and 1 in self.train_data.labeled_vector.unique().tolist():
+                ct_latent = latent[labels == idx]
+                ct_std = torch.std(ct_latent, dim=0)
+                ct_distr = Normal(landmark.cpu(), ct_std.cpu())
+                landmarks.append(ct_distr)
+                landmarks_normalize.append(torch.mean(ct_distr.log_prob(landmark.cpu()).exp(), axis=0))
+            else:
+                ct_distr = self.model.landmarks_labeled[idx]
+                landmarks.append(ct_distr)
+                landmarks_normalize.append(torch.mean(ct_distr.log_prob(landmark.cpu()).exp(), axis=0))
+        landmarks_normalize = torch.stack(landmarks_normalize)
+
+        return landmarks, landmarks_normalize
