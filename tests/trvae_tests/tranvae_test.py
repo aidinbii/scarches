@@ -10,36 +10,47 @@ sc.settings.set_figure_params(dpi=200, frameon=False)
 sc.set_figure_params(dpi=200)
 torch.set_printoptions(precision=3, sci_mode=False, edgeitems=7)
 
-condition_key = 'study'
-cell_type_key = 'cell_type'
-target_conditions = []
-n_labelled_samples_per_class = 2000
+test_nr = 4
+condition_key = "condition"
+cell_type_key = "final_annotation"
+n_labelled_samples_per_class = 500
 
 
-trvae_epochs = 500
-surgery_epochs = 500
+tranvae_epochs = 500
 
 early_stopping_kwargs = {
     "early_stopping_metric": "val_classifier_loss",
-    "threshold": 0,
+    "threshold": 0.2,
     "patience": 20,
     "reduce_lr": True,
     "lr_patience": 13,
     "lr_factor": 0.1,
 }
+if test_nr == 1:
+    reference = ['10X']
+    query = ['Oetjen', 'Sun', 'Freytag']
+elif test_nr == 2:
+    reference = ['10X', 'Oetjen']
+    query = ['Sun', 'Freytag']
+elif test_nr == 3:
+    reference = ['10X', 'Oetjen', 'Sun']
+    query = ['Freytag']
+elif test_nr == 4:
+    reference = ['10X', 'Oetjen', 'Sun','Freytag']
+    query = []
 
-adata_all = sc.read(os.path.expanduser(f'~/Documents/benchmarking_datasets/pancreas_normalized.h5ad'))
+adata_all = sc.read(os.path.expanduser(f'~/Documents/benchmarking_datasets/Immune_ALL_human_wo_villani_rqr_normalized_hvg.h5ad'))
 adata = adata_all.raw.to_adata()
 adata = remove_sparsity(adata)
-source_adata = adata[~adata.obs[condition_key].isin(target_conditions)]
-target_adata = adata[adata.obs[condition_key].isin(target_conditions)]
-source_conditions = source_adata.obs[condition_key].unique().tolist()
+source_adata = adata[adata.obs.study.isin(reference)]
+target_adata = adata[adata.obs.study.isin(query)]
 
 labeled_ind = []
 unlabeled_ind = []
-un_labels_r = source_adata.obs[cell_type_key].unique().tolist()
+un_labels_r = source_adata[source_adata.obs.study != '10X'].obs[cell_type_key].unique().tolist()
+print(un_labels_r)
 for label in un_labels_r:
-    mask = source_adata.obs['cell_type'] == label
+    mask = source_adata.obs[cell_type_key] == label
     mask = mask.tolist()
     idx = np.where(mask)[0]
     np.random.shuffle(idx)
@@ -49,6 +60,7 @@ for label in un_labels_r:
 print(len(labeled_ind))
 print(len(unlabeled_ind))
 
+
 tranvae = sca.models.TRANVAE(
     adata=source_adata,
     condition_key=condition_key,
@@ -56,13 +68,14 @@ tranvae = sca.models.TRANVAE(
     labeled_indices=labeled_ind,
     hidden_layer_sizes=[128, 128],
     use_mmd=False,
-    n_clusters=20
+    n_clusters=10,
 )
 tranvae.model.load_state_dict(torch.load(os.path.expanduser(f'~/Documents/reference_model_state_dict')))
+
 tranvae.train(
-    n_epochs=trvae_epochs,
+    n_epochs=tranvae_epochs,
     early_stopping_kwargs=early_stopping_kwargs,
-    eta=500,
+    eta=10,
     tau=0,
 )
 ref_path = os.path.expanduser(f'~/Documents/reference_model')

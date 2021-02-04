@@ -55,8 +55,12 @@ class tranVAE(trVAE):
 
         return results
 
-    def classify(self, x, c=None):
-        latent = self.get_latent(x,c)
+    def classify(self, x, c=None, landmark=False):
+        if landmark:
+            latent = x
+        else:
+            latent = self.get_latent(x,c)
+
         results = self.get_prob_matrix(latent)
         probs, preds = torch.max(results, axis=1)
         return preds, probs

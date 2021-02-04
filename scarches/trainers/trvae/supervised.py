@@ -135,7 +135,7 @@ class tranVAETrainer(Trainer):
 
         # Calculate classifier loss for labeled/unlabeled data
         label_categories = total_batch["labeled"].unique().tolist()
-        landmark_loss = None
+        landmark_loss = torch.tensor(0, device=self.device, requires_grad=False)
         unlabeled_loss = torch.tensor(0, device=self.device, requires_grad=False)
         labeled_loss = torch.tensor(0, device=self.device, requires_grad=False)
         if 0 in label_categories:
@@ -144,14 +144,14 @@ class tranVAETrainer(Trainer):
                 torch.stack(self.landmarks_unlabeled).squeeze(),
                 self.tau,
             )
-            #landmark_loss = unlabeled_loss
+            landmark_loss = landmark_loss+ unlabeled_loss
         if 1 in label_categories:
             labeled_loss, labeled_accuracy = self.landmark_labeled_loss(
                 latent[total_batch['labeled'] == 1],
                 self.landmarks_labeled,
                 total_batch["celltype"][total_batch['labeled'] == 1],
             )
-            landmark_loss = labeled_loss if landmark_loss is None else landmark_loss + labeled_loss
+            landmark_loss = landmark_loss + labeled_loss
         classifier_loss = self.eta * landmark_loss
 
         loss = trvae_loss + classifier_loss

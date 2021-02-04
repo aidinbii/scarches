@@ -72,6 +72,11 @@ class TRANVAE(BaseMixin):
         self.condition_key_ = condition_key
         self.cell_type_key_ = cell_type_key
 
+        if labeled_indices is None:
+            self.labeled_indices_ = range(len(adata))
+        else:
+            self.labeled_indices_ = labeled_indices
+
         if conditions is None:
             if condition_key is not None:
                 self.conditions_ = adata.obs[condition_key].unique().tolist()
@@ -82,16 +87,11 @@ class TRANVAE(BaseMixin):
 
         if cell_types is None:
             if cell_type_key is not None:
-                self.cell_types_ = adata.obs[cell_type_key].unique().tolist()
+                self.cell_types_ = adata.obs[cell_type_key][labeled_indices].unique().tolist()
             else:
                 self.cell_types_ = []
         else:
             self.cell_types_ = cell_types
-
-        if labeled_indices is None:
-            self.labeled_indices_ = range(len(adata))
-        else:
-            self.labeled_indices_ = labeled_indices
 
         self.hidden_layer_sizes_ = hidden_layer_sizes
         self.latent_dim_ = latent_dim
@@ -223,22 +223,23 @@ class TRANVAE(BaseMixin):
             self,
             x: Optional[np.ndarray] = None,
             c: Optional[np.ndarray] = None,
+            landmark=False,
     ):
         device = next(self.model.parameters()).device
+        if not landmark:
+            if x is None:
+                x = self.adata.X
+                if self.conditions_ is not None:
+                    c = self.adata.obs[self.condition_key_]
 
-        if x is None:
-            x = self.adata.X
-            if self.conditions_ is not None:
-                c = self.adata.obs[self.condition_key_]
-
-        if c is not None:
-            c = np.asarray(c)
-            if not set(c).issubset(self.conditions_):
-                raise ValueError("Incorrect conditions")
-            labels = np.zeros(c.shape[0])
-            for condition, label in self.model.condition_encoder.items():
-                labels[c == condition] = label
-            c = torch.tensor(labels, device=device)
+            if c is not None:
+                c = np.asarray(c)
+                if not set(c).issubset(self.conditions_):
+                    raise ValueError("Incorrect conditions")
+                labels = np.zeros(c.shape[0])
+                for condition, label in self.model.condition_encoder.items():
+                    labels[c == condition] = label
+                c = torch.tensor(labels, device=device)
 
         x = torch.tensor(x, device=device)
 
@@ -247,7 +248,10 @@ class TRANVAE(BaseMixin):
         indices = torch.arange(x.size(0), device=device)
         subsampled_indices = indices.split(512)
         for batch in subsampled_indices:
-            pred, prob = self.model.classify(x[batch, :], c[batch])
+            if landmark:
+                pred, prob = self.model.classify(x[batch, :], landmark=landmark)
+            else:
+                pred, prob = self.model.classify(x[batch, :], c[batch], landmark=landmark)
             preds += [pred.cpu().detach()]
             probs += [prob.cpu().detach()]
 
@@ -256,25 +260,48 @@ class TRANVAE(BaseMixin):
         full_pred_names = []
 
         for pred in full_pred:
-            full_pred_names.append(inv_ct_encoder[pred])
+            if landmark:
+                full_pred_names.append(inv_ct_encoder[pred] + ' Landmark')
+            else:
+                full_pred_names.append(inv_ct_encoder[pred])
 
         full_prob = np.array(torch.cat(probs))
 
         return np.array(full_pred_names), full_prob
 
     def check_for_unseen(self):
-        pred, prob = self.model.check_for_unseen()
-        full_prob = prob.detach().cpu().numpy()
-        full_pred = pred.detach().cpu().numpy()
-        inv_ct_encoder = {v: k for k, v in self.model.cell_type_encoder.items()}
-        full_pred_names = []
-        for idx, pred in enumerate(full_pred):
-            if full_prob[idx] >= 0.01:
-                full_pred_names.append(inv_ct_encoder[pred])
-            else:
-                full_pred_names.append('UNSEEN')
+        if self.model.landmarks_unlabeled is not None:
+            pred, prob = self.model.check_for_unseen()
+            full_prob = prob.detach().cpu().numpy()
+            full_pred = pred.detach().cpu().numpy()
+            inv_ct_encoder = {v: k for k, v in self.model.cell_type_encoder.items()}
+            full_pred_names = []
+            for idx, pred in enumerate(full_pred):
+                if full_prob[idx]:
+                    full_pred_names.append(inv_ct_encoder[pred])
+            return np.array(full_pred_names), full_prob
+        else:
+            print("There are no unlabeled Landmarks in the model.")
+            return None, None
 
-        return np.array(full_pred_names), full_prob
+    def get_landmarks_info(self):
+        landmarks_l = None
+        for landmark in self.landmarks_labeled_:
+            mean = landmark.mean.detach().cpu().numpy()
+            mean = np.expand_dims(mean, axis=0)
+            landmarks_l = np.concatenate((landmarks_l, mean)) if landmarks_l is not None else mean
+
+        l_pred, l_prob = self.classify(landmarks_l, landmark=True)
+
+        landmarks_u = self.landmarks_unlabeled_
+        u_pred, u_prob = self.classify(landmarks_u, landmark=True)
+
+        x_info = np.concatenate((landmarks_l, landmarks_u))
+        label_info = np.concatenate((l_pred, u_pred))
+        prob_info = np.concatenate((l_prob, u_prob))
+        batch_info = np.array((landmarks_l.shape[0] * ['Landmark Labeled'] +
+                               landmarks_u.shape[0] * ['Landmark Unlabeled']))
+        return x_info, label_info, batch_info, prob_info
 
     @classmethod
     def _get_init_params_from_dict(cls, dct):
@@ -367,7 +394,7 @@ class TRANVAE(BaseMixin):
         cell_types = init_params['cell_types']
         cell_type_key = init_params['cell_type_key']
         new_cell_types = []
-        adata_cell_types = adata.obs[cell_type_key].unique().tolist()
+        adata_cell_types = adata.obs[cell_type_key][labeled_indices].unique().tolist()
         # Check if new conditions are already known
         for item in adata_cell_types:
             if item not in cell_types:

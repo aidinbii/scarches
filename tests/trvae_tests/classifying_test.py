@@ -20,36 +20,36 @@ sc.settings.set_figure_params(dpi=200, frameon=False)
 sc.set_figure_params(dpi=200)
 torch.set_printoptions(precision=3, sci_mode=False, edgeitems=7)
 
-condition_key = 'study'
-cell_type_key = 'cell_type'
-target_conditions = []
-n_labelled_samples_per_class = 1000
+test_nr = 4
+condition_key = "condition"
+cell_type_key = "final_annotation"
+n_labelled_samples_per_class = 500
 
+if test_nr == 1:
+    reference = ['10X']
+    query = ['Oetjen', 'Sun', 'Freytag']
+elif test_nr == 2:
+    reference = ['10X', 'Oetjen']
+    query = ['Sun', 'Freytag']
+elif test_nr == 3:
+    reference = ['10X', 'Oetjen', 'Sun']
+    query = ['Freytag']
+elif test_nr == 4:
+    reference = ['10X', 'Oetjen', 'Sun','Freytag']
+    query = []
 
-trvae_epochs = 500
-surgery_epochs = 500
-
-early_stopping_kwargs = {
-    "early_stopping_metric": "val_classifier_loss",
-    "threshold": 0,
-    "patience": 20,
-    "reduce_lr": True,
-    "lr_patience": 13,
-    "lr_factor": 0.1,
-}
-
-adata_all = sc.read(os.path.expanduser(f'~/Documents/benchmarking_datasets/pancreas_normalized.h5ad'))
+adata_all = sc.read(os.path.expanduser(f'~/Documents/benchmarking_datasets/Immune_ALL_human_wo_villani_rqr_normalized_hvg.h5ad'))
 adata = adata_all.raw.to_adata()
 adata = remove_sparsity(adata)
-source_adata = adata[~adata.obs[condition_key].isin(target_conditions)]
-target_adata = adata[adata.obs[condition_key].isin(target_conditions)]
-source_conditions = source_adata.obs[condition_key].unique().tolist()
+source_adata = adata[adata.obs.study.isin(reference)]
+target_adata = adata[adata.obs.study.isin(query)]
 
 labeled_ind = []
 unlabeled_ind = []
-un_labels_r = source_adata.obs[cell_type_key].unique().tolist()
+un_labels_r = source_adata[source_adata.obs.study != '10X'].obs[cell_type_key].unique().tolist()
+print(un_labels_r)
 for label in un_labels_r:
-    mask = source_adata.obs['cell_type'] == label
+    mask = source_adata.obs[cell_type_key] == label
     mask = mask.tolist()
     idx = np.where(mask)[0]
     np.random.shuffle(idx)
@@ -65,36 +65,73 @@ tranvae = sca.models.TRANVAE.load(
 )
 
 preds, probs = tranvae.classify()
-print(np.mean(preds == source_adata.obs.cell_type))
-correct_probs = probs[preds == source_adata.obs.cell_type]
-incorrect_probs = probs[preds != source_adata.obs.cell_type]
-data = [correct_probs,incorrect_probs]
+print(np.mean(preds == source_adata.obs[cell_type_key]))
+correct_probs = probs[preds == source_adata.obs[cell_type_key]]
+incorrect_probs = probs[preds != source_adata.obs[cell_type_key]]
+data = [correct_probs, incorrect_probs]
 
-fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(9, 4), sharey=True)
 
-ax1.set_title('Default violin plot')
-ax1.set_ylabel('Observed values')
-ax1.violinplot(data)
-
-ax2.set_title('Customized violin plot')
-parts = ax2.violinplot(
-        data, showmeans=False, showmedians=False,
-        showextrema=False)
-
-for pc in parts['bodies']:
-    pc.set_facecolor('#D43F3A')
-    pc.set_edgecolor('black')
-    pc.set_alpha(1)
-
-# set style for the axes
+fig, ax = plt.subplots()
+ax.set_title('Default violin plot')
+ax.set_ylabel('Observed values')
+ax.violinplot(data)
 labels = ['Correct', 'Incorrect']
-for ax in [ax1, ax2]:
-    set_axis_style(ax, labels)
-
-plt.subplots_adjust(bottom=0.15, wspace=0.05)
+set_axis_style(ax, labels)
 plt.show()
 
-preds, probs = tranvae.check_for_unseen()
-print(preds)
-print(probs)
+x,y,c,p = tranvae.get_landmarks_info()
+print(p)
+print(y)
+y_l = np.unique(y).tolist()
+c_l = np.unique(c).tolist()
+y_uniq = source_adata.obs[cell_type_key].unique().tolist()
+y_uniq_m = tranvae.cell_types_
 
+
+data_latent = tranvae.get_latent()
+data_extended = np.concatenate((data_latent, x))
+adata_latent = sc.AnnData(data_extended)
+adata_latent.obs['celltype'] = source_adata.obs[cell_type_key].tolist() + y.tolist()
+adata_latent.obs['batch'] = source_adata.obs[condition_key].tolist() + c.tolist()
+adata_latent.obs['predictions'] = preds.tolist() + y.tolist()
+
+sc.pp.neighbors(adata_latent, n_neighbors=8)
+sc.tl.leiden(adata_latent)
+sc.tl.umap(adata_latent)
+sc.pl.umap(adata_latent,
+           color=['batch'],
+           groups=c_l,
+           frameon=False,
+           wspace=0.6,
+           size=50,
+           show=False
+           )
+plt.savefig(os.path.expanduser(f'~/Documents/umap_ref_tranvae_batch_l.png'), bbox_inches='tight')
+
+sc.pl.umap(adata_latent,
+           color=['celltype'],
+           groups=y_l,
+           frameon=False,
+           wspace=0.6,
+           size=50,
+           show=False
+           )
+plt.savefig(os.path.expanduser(f'~/Documents/umap_ref_tranvae_ct_l.png'), bbox_inches='tight')
+
+sc.pl.umap(adata_latent,
+           color=['celltype'],
+           groups=y_uniq,
+           frameon=False,
+           wspace=0.6,
+           show=False
+           )
+plt.savefig(os.path.expanduser(f'~/Documents/umap_ref_tranvae_ct.png'), bbox_inches='tight')
+
+sc.pl.umap(adata_latent,
+           color=['predictions'],
+           groups=y_uniq_m,
+           frameon=False,
+           wspace=0.6,
+           show=False
+           )
+plt.savefig(os.path.expanduser(f'~/Documents/umap_ref_tranvae_pred.png'), bbox_inches='tight')

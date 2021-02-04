@@ -10,34 +10,45 @@ sc.settings.set_figure_params(dpi=200, frameon=False)
 sc.set_figure_params(dpi=200)
 torch.set_printoptions(precision=3, sci_mode=False, edgeitems=7)
 
-condition_key = 'study'
-cell_type_key = 'cell_type'
-target_conditions = []
+test_nr = 4
+condition_key = "condition"
+cell_type_key = "final_annotation"
 
 
-trvae_epochs = 500
-surgery_epochs = 500
+trvae_epochs = 150
 
 early_stopping_kwargs = {
     "early_stopping_metric": "val_unweighted_loss",
     "threshold": 0,
-    "patience": 20,
+    "patience": 200,
     "reduce_lr": True,
-    "lr_patience": 13,
+    "lr_patience": 50,
     "lr_factor": 0.1,
 }
 
-adata_all = sc.read(os.path.expanduser(f'~/Documents/benchmarking_datasets/pancreas_normalized.h5ad'))
+adata_all = sc.read(os.path.expanduser(f'~/Documents/benchmarking_datasets/Immune_ALL_human_wo_villani_rqr_normalized_hvg.h5ad'))
 adata = adata_all.raw.to_adata()
 adata = remove_sparsity(adata)
-source_adata = adata[~adata.obs[condition_key].isin(target_conditions)]
-target_adata = adata[adata.obs[condition_key].isin(target_conditions)]
-source_conditions = source_adata.obs[condition_key].unique().tolist()
+
+if test_nr == 1:
+    reference = ['10X']
+    query = ['Oetjen', 'Sun', 'Freytag']
+elif test_nr == 2:
+    reference = ['10X', 'Oetjen']
+    query = ['Sun', 'Freytag']
+elif test_nr == 3:
+    reference = ['10X', 'Oetjen', 'Sun']
+    query = ['Freytag']
+elif test_nr == 4:
+    reference = ['10X', 'Oetjen', 'Sun','Freytag']
+    query = []
+
+source_adata = adata[adata.obs.study.isin(reference)]
+target_adata = adata[adata.obs.study.isin(query)]
 
 trvae = sca.models.TRVAE(
     adata=source_adata,
     condition_key=condition_key,
-    conditions=source_conditions,
     hidden_layer_sizes=[128, 128],
     use_mmd=False
 )
